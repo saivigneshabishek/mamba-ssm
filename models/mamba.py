@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from utils.rms import RMSNorm
-
+from utils.pscan import pscan
 
 class MambaResidual(nn.Module):
     def __init__(self):
@@ -31,6 +31,7 @@ class Mamba(nn.Module):
                  dt_rank=4,
                  conv_kernel=4,
                  dt_softplus=True,
+                 parallel_sum=True,
                  ):
         '''a singular mamba block as introduced in https://arxiv.org/abs/2312.00752'''
         super(Mamba, self).__init__()
@@ -42,6 +43,7 @@ class Mamba(nn.Module):
         self.dt_rank = dt_rank
         self.conv_kernel = conv_kernel
         self.dt_softplus = dt_softplus
+        self.pscan = parallel_sum
 
         self.in_proj = nn.Linear(self.d_model, self.d_inner*2) 
 
@@ -64,6 +66,15 @@ class Mamba(nn.Module):
         mamba is a seq2seq model
         x   : (B,L,D)
         out : (B,L,D)
+        -----
+        B: batch
+        L: seq length
+        D: model dim (d_model)
+        E: expansion factor
+        ED: inner dim (d_inner)
+        N: state dim (d_state)
+        h: hidden states
+        -----
         '''
 
         _, l, _ = x.shape # (B L D)
@@ -98,17 +109,23 @@ class Mamba(nn.Module):
 
         b, l, d_in, n = A_bar.shape
 
-        # hidden state (B, ED, N)
-        h = torch.zeros(b,d_in,n, device=x.device)
-        y = []
-        # propagate through seqlen dim to compute h and y
-        for i in range(l):
-            # h(t) = A*h(t-1) + B*x(t)
-            h = A_bar[:,i] * h + B_bar_x[:,i]
+        if self.pscan:
+            # hidden state (B, L, ED, N)
+            h = pscan(A_bar, B_bar_x)
             # y(t) = C*h(t)
-            y_ = torch.einsum('bdn,bn->bd', h, C[:,i])
-            y.append(y_)     
-        y = torch.stack(y,dim=1)
+            y = torch.einsum('bldn,bln->bld', h, C)
+        else:
+            # hidden state (B, ED, N)
+            h = torch.zeros(b,d_in,n, device=x.device)
+            y = []
+            # propagate through seqlen dim to compute h and y
+            for i in range(l):
+                # h(t) = A*h(t-1) + B*x(t)
+                h = A_bar[:,i] * h + B_bar_x[:,i]
+                # y(t) = C*h(t)
+                y_ = torch.einsum('bdn,bn->bd', h, C[:,i])
+                y.append(y_)     
+            y = torch.stack(y,dim=1)
 
         # skip connection, y(t) = C*h(t) + D*x(t)
         y = y + D*x
