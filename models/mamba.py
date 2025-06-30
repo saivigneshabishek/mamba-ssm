@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.rms import RMSNorm
-from utils.pscan import pscan
+from models.utils.rms import RMSNorm
+from models.utils.pscan import pscan
 
 class MambaResidual(nn.Module):
     def __init__(self):
